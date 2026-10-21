@@ -372,6 +372,77 @@ describe("dyld resolution outcomes: deriving path and weak-load outcomes", () =>
   });
 });
 
+describe("unresolved candidate findings", () => {
+  it("distinguishes a present wrong-architecture candidate from an absent one", async () => {
+    const dylib = "Contents/Frameworks/libvalue.dylib";
+    const name = "@rpath/libvalue.dylib";
+    const main = executable({
+      rpaths: ["@executable_path/../Frameworks"],
+      dependencies: [dependency(name)],
+    });
+    const traceWith = (candidate?: MachoImageFacts) =>
+      traceDylibLoading(
+        memoryView({
+          [MAIN]: main,
+          ...(candidate === undefined ? {} : { [dylib]: candidate }),
+        }),
+        { roots: [MAIN] },
+      );
+
+    const incompatible = await traceWith(
+      parsed(slice({ architecture: "x86_64" })),
+    );
+    const incompatibleEdge = edgeFor(incompatible, MAIN, name);
+    expect(incompatibleEdge.resolution).toEqual({
+      status: "unresolved",
+      image: null,
+    });
+    expect(incompatibleEdge.candidates).toEqual([
+      expect.objectContaining({
+        path: "Contents/MacOS/../Frameworks/libvalue.dylib",
+        outcome: "architecture-missing",
+        resolved_path: dylib,
+      }),
+    ]);
+    expect(incompatible.findings).toContainEqual(
+      expect.objectContaining({
+        kind: "required-load-unresolved",
+        explanation: expect.stringContaining(
+          `A candidate for ${name} exists in the analyzed root but is unusable (architecture-missing)`,
+        ),
+      }),
+    );
+
+    const absent = await traceWith();
+    expect(edgeFor(absent, MAIN, name).candidates).toEqual([
+      expect.objectContaining({
+        path: "Contents/MacOS/../Frameworks/libvalue.dylib",
+        outcome: "absent",
+        resolved_path: null,
+      }),
+    ]);
+    expect(absent.findings).toContainEqual(
+      expect.objectContaining({
+        kind: "required-load-unresolved",
+        explanation: expect.stringContaining(
+          `No candidate for ${name} exists in the analyzed root`,
+        ),
+      }),
+    );
+
+    const compatible = await traceWith(parsed(slice()));
+    expect(edgeFor(compatible, MAIN, name).resolution).toEqual({
+      status: "resolved",
+      image: dylib,
+    });
+    expect(
+      compatible.findings.some(
+        ({ kind }) => kind === "required-load-unresolved",
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("dyld resolution outcomes: checking candidate format and compatibility", () => {
   it("reports non-Mach-O, malformed and wrong-architecture candidates", async () => {
     const trace = await traceDylibLoading(
@@ -398,6 +469,14 @@ describe("dyld resolution outcomes: checking candidate format and compatibility"
         ({ outcome }) => outcome,
       ),
     ).toEqual(["not-mach-o", "malformed", "architecture-missing"]);
+    expect(trace.findings).toContainEqual(
+      expect.objectContaining({
+        kind: "required-load-unresolved",
+        explanation: expect.stringContaining(
+          "Candidates for @rpath/lib.dylib exist in the analyzed root but are unusable",
+        ),
+      }),
+    );
     expect(trace.coverage).toEqual({
       status: "partial",
       unparsed_images: ["Contents/MacOS/b/lib.dylib"],

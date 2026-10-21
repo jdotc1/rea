@@ -70,7 +70,15 @@ const unresolvedFinding = (edge: Edge, index: number): Finding => {
     basis: "derived",
   } as const;
   const lazy = isLazyLoadCommand(edge.command);
-  const missing = `No candidate for ${dependencyPhrase(edge, lazy)} exists in the analyzed root`;
+  const present = edge.candidates.filter(
+    ({ resolved_path }) => resolved_path !== null,
+  );
+  const missing =
+    present.length === 0
+      ? `No candidate for ${dependencyPhrase(edge, lazy)} exists in the analyzed root`
+      : present.length === 1 && present[0] !== undefined
+        ? `A candidate for ${dependencyPhrase(edge, lazy)} exists in the analyzed root but is unusable (${present[0].outcome})`
+        : `Candidates for ${dependencyPhrase(edge, lazy)} exist in the analyzed root but are unusable`;
   // Below a conditional fallback, every consequence applies only if it loads.
   const when = edge.loader_conditional
     ? `. ${edge.loader} loads only conditionally; if it loads, `
