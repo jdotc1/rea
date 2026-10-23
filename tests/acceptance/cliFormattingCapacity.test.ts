@@ -1,5 +1,7 @@
 import { writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { expect } from "vitest";
 import { parse as parseYaml } from "yaml";
@@ -8,8 +10,8 @@ import { buildManagedPeFixture } from "../../src/dotnet/ManagedPe.fixture.js";
 import { analysisErrorProjectionSchema } from "../../src/contracts/errorSchemas.js";
 import { workspaceCliTest } from "../support/cli/workspaceCliFixture.js";
 
-// Exercise the real dispatcher and pinned formatter with an authored capacity
-// failure. No engine-sized document or native target execution is needed.
+// Exercise the real dispatcher and both formatting owners with an authored
+// capacity failure. No engine-sized document or native target execution is needed.
 const formatterFailure = `
   if (fmt !== "json" && fmt !== "jsonl" &&
       (value?.operation === "inspect_managed_artifact" ||
@@ -22,14 +24,39 @@ const formatterFailure = `
 `;
 const formatterCapacityHook = `data:text/javascript,${encodeURIComponent(`
 import { registerHooks } from "node:module";
+import { parse } from ${JSON.stringify(pathToFileURL(createRequire(import.meta.url).resolve("@babel/parser")).href)};
 registerHooks({
   load(url, context, next) {
     const loaded = next(url, context);
-    if (!url.endsWith("/incur/dist/Formatter.js")) return loaded;
+    if (url.endsWith("/incur/dist/Formatter.js")) {
+      const source = String(loaded.source);
+      const signature = "export function format(value, fmt = 'toon') {";
+      if (!source.includes(signature)) throw new Error("Pinned formatter boundary changed");
+      return { ...loaded, source: source.replace(signature, signature + ${JSON.stringify(formatterFailure)}) };
+    }
+    if (!url.startsWith(${JSON.stringify(`${pathToFileURL(resolve("dist/cli-runtime")).href}/`)})) return loaded;
+    const original = new URL(url);
+    if (original.searchParams.has("rea-format-capacity-original")) return loaded;
     const source = String(loaded.source);
-    const signature = "export function format(value, fmt = 'toon') {";
-    if (!source.includes(signature)) throw new Error("Pinned formatter boundary changed");
-    return { ...loaded, source: source.replace(signature, signature + ${JSON.stringify(formatterFailure)}) };
+    if (!source.includes("formatCliOutput")) return loaded;
+    const ownsFormatter = parse(source, { sourceType: "module" }).program.body.some(
+      (statement) => statement.type === "ExportNamedDeclaration" &&
+        statement.source === null && statement.specifiers.some(
+          (specifier) => specifier.type === "ExportSpecifier" &&
+            specifier.exported.type === "Identifier" &&
+            specifier.exported.name === "formatCliOutput",
+        ),
+    );
+    if (!ownsFormatter) return loaded;
+    original.searchParams.set("rea-format-capacity-original", "1");
+    const originalModule = JSON.stringify(original.href);
+    return {
+      ...loaded,
+      source: "export * from " + originalModule + ";\\n" +
+        "import { formatCliOutput as originalFormat } from " + originalModule + ";\\n" +
+        "export const formatCliOutput = (value, fmt) => {" +
+        ${JSON.stringify(formatterFailure)} + "return originalFormat(value, fmt); };",
+    };
   },
 });
 `)}`;

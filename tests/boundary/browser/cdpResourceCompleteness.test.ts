@@ -193,17 +193,20 @@ describe("resource inventory omissions through CDP", () => {
         });
     },
   );
+});
 
+describe("optional resource fields through CDP", () => {
   it.each([
     {
       fields: { type: "Other", mimeType: "", contentSize: undefined },
       size: null,
+      comparison: "unknown",
     },
-    { fields: { contentSize: 0 }, size: 0 },
-    { fields: { contentSize: 1.5 }, size: 1.5 },
+    { fields: { contentSize: 0 }, size: 0, comparison: "unchanged" },
+    { fields: { contentSize: 1.5 }, size: 1.5, comparison: "unchanged" },
   ])(
     "accepts valid optional and empty fields: $fields",
-    async ({ fields, size }) => {
+    async ({ fields, size, comparison }) => {
       const { state, inspect } = await startBrowser();
       state.peerFields = fields;
       const capture = await inspect();
@@ -215,10 +218,17 @@ describe("resource inventory omissions through CDP", () => {
       expect(capture.completeness.unavailable_sections).not.toContain(
         "resources",
       );
-      expect(compareResources(capture, capture).status).toBe("unchanged");
+      expect(compareResources(capture, capture)).toMatchObject({
+        status: comparison,
+        total_changes: 0,
+        changes: [],
+        reason: comparison === "unchanged" ? null : expect.any(String),
+      });
     },
   );
+});
 
+describe("resource inventory membership through CDP", () => {
   it.each([
     "missing",
     "null",
