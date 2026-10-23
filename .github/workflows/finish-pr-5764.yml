@@ -1,0 +1,131 @@
+name: Finish REA PR 5764
+
+on:
+  push:
+    branches:
+      - automation/finish-rea-5764
+
+permissions:
+  contents: write
+
+jobs:
+  finish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: docs/5589-resource-only-bundle-admission
+          fetch-depth: 0
+
+      - name: Use the repository-supported Node release
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+
+      - name: Merge upstream and resolve the documentation conflict
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/morluto/rea.git
+          git fetch upstream main
+
+          set +e
+          git merge --no-ff --no-commit upstream/main
+          merge_status=$?
+          set -e
+
+          if [[ "$merge_status" -ne 0 ]]; then
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            if [[ "$conflicts" != "docs/native-investigation.md" ]]; then
+              printf 'Unexpected merge conflicts:\n%s\n' "$conflicts" >&2
+              exit 1
+            fi
+
+            git checkout --theirs docs/native-investigation.md
+            python - <<'PY'
+          from pathlib import Path
+
+          path = Path("docs/native-investigation.md")
+          text = path.read_text(encoding="utf-8")
+          anchor = (
+              "Native Xcode command execution uses shared process supervision with a 60-second\n"
+              "deadline and a 64 MiB aggregate stdout/stderr budget. Timeout, cancellation,\n"
+              "stream failure, and output exhaustion retain the captured output, exit details,\n"
+              "and cleanup outcome in the error result. Truncated output is never parsed as a\n"
+              "complete observation.\n"
+          )
+          insertion = """
+
+          The four app resource commands, `inspect_plist`, `inspect_asset_catalog`,
+          `inspect_keyed_archive`, and `decode_interface_builder`, use a separate read-only
+          resource session when the CLI input is a bundle directory. They do not require
+          `CFBundleExecutable`, resolve a program by filename convention, or establish
+          executable identity. For MCP, select the app with `open_bundle_resources` before
+          querying its resources. `inspect_plist` defaults to the selected bundle's
+          Info.plist. A declared executable is not opened or validated by this resource
+          route either.
+
+          Resource-only Evidence has a null `subject`; results identify the selected
+          root through `resource_root`, and executable target digests remain null. Use
+          the reported per-resource provenance for the bytes actually read. A supported
+          Info.plist layout identifies a resource root; it does not establish that the
+          plist contents or every resource can be decoded. Parsing, resource selection,
+          and filesystem failures remain explicit outcomes of their respective readers.
+
+          Executable analysis still uses `open_binary` and the ordinary binary admission
+          checks. Missing or invalid executable declarations, unsafe program names, and
+          unresolved program paths remain typed failures on that route. Resource sessions
+          do not support binary-only operations or binary analysis snapshots. See the
+          [resource session contract](mcp-contracts.md#identity-and-discovery) for
+          session status and provenance semantics.
+          """
+          insertion = "\n".join(line[10:] if line.startswith("          ") else line for line in insertion.splitlines())
+          if text.count(anchor) != 1:
+              raise SystemExit("expected native-command supervision paragraph exactly once")
+          if "The four app resource commands" in text:
+              raise SystemExit("resource-session text already present")
+          path.write_text(text.replace(anchor, anchor + insertion + "\n"), encoding="utf-8")
+          PY
+            git add docs/native-investigation.md
+          fi
+
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            git diff --name-only --diff-filter=U >&2
+            exit 1
+          fi
+
+          git restore --source=HEAD --staged --worktree .github/workflows
+
+          git commit -m "Merge upstream main into resource-session docs"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Format the resolved documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx oxfmt --write docs/native-investigation.md
+          git add docs/native-investigation.md
+          git commit --amend --no-edit
+
+      - name: Build documentation
+        run: npm run docs:build
+
+      - name: Run repository checks
+        run: npm run check
+
+      - name: Check contribution diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check upstream/main...HEAD
+          git diff --name-only upstream/main...HEAD
+
+      - name: Push the existing PR branch
+        shell: bash
+        run: git push origin HEAD:refs/heads/docs/5589-resource-only-bundle-admission
